@@ -5,6 +5,7 @@ Uses persistent FlareSolverr session with auto-recreate on challenge.
 Proper REST API with HTTP status codes and structured errors.
 """
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -150,42 +151,50 @@ def is_challenge_response(html: str) -> bool:
 
 # ==================== FLARESOLVERR CLIENT ====================
 
-async def create_flaresolverr_session() -> bool:
-    """Create persistent FlareSolverr session with consistent headers."""
+async def create_flaresolverr_session(max_retries: int = 10, retry_delay: float = 3.0) -> bool:
+    """Create persistent FlareSolverr session with consistent headers.
+    
+    Args:
+        max_retries: Maximum number of retry attempts (default 10)
+        retry_delay: Delay between retries in seconds (default 3.0)
+    """
     global _session_created
-    try:
-        resp = await _http_client.post(
-            f"{FLARESOLVERR_URL}/v1",
-            json={
-                "cmd": "sessions.create",
-                "session": SESSION_NAME,
-            },
-            timeout=30
-        )
-        data = resp.json()
-        if data.get("status") == "ok":
-            log.info("FlareSolverr session '%s' created", SESSION_NAME)
-            _session_created = True
-            return True
-        else:
-            log.error("Failed to create FlareSolverr session: %s", data)
-            return False
-    except httpx.ConnectError as e:
-        raise UpstreamUnavailableError(
-            "Cannot connect to FlareSolverr",
-            details={"url": FLARESOLVERR_URL, "error": str(e)}
-        )
-    except httpx.TimeoutException as e:
-        raise UpstreamTimeoutError(
-            "FlareSolverr connection timeout",
-            details={"url": FLARESOLVERR_URL, "error": str(e)}
-        )
-    except Exception as e:
-        log.exception("Error creating FlareSolverr session")
-        raise SessionError(
-            "Failed to create FlareSolverr session",
-            details={"error": str(e)}
-        )
+    
+    for attempt in range(max_retries):
+        try:
+            resp = await _http_client.post(
+                f"{FLARESOLVERR_URL}/v1",
+                json={
+                    "cmd": "sessions.create",
+                    "session": SESSION_NAME,
+                },
+                timeout=30
+            )
+            data = resp.json()
+            if data.get("status") == "ok":
+                log.info("FlareSolverr session '%s' created", SESSION_NAME)
+                _session_created = True
+                return True
+            else:
+                log.warning("Failed to create FlareSolverr session (attempt %d/%d): %s", 
+                           attempt + 1, max_retries, data)
+        except httpx.ConnectError as e:
+            log.warning("FlareSolverr not ready (attempt %d/%d): %s", 
+                       attempt + 1, max_retries, e)
+        except httpx.TimeoutException as e:
+            log.warning("FlareSolverr timeout (attempt %d/%d): %s", 
+                       attempt + 1, max_retries, e)
+        except Exception as e:
+            log.warning("Error creating FlareSolverr session (attempt %d/%d): %s", 
+                       attempt + 1, max_retries, e)
+        
+        if attempt < max_retries - 1:
+            log.info("Retrying in %.1f seconds... (attempt %d/%d)", 
+                    retry_delay, attempt + 2, max_retries)
+            await asyncio.sleep(retry_delay)
+    
+    log.error("Failed to create FlareSolverr session after %d attempts", max_retries)
+    return False
 
 
 async def destroy_flaresolverr_session() -> None:
@@ -350,8 +359,10 @@ async def lifespan(app: FastAPI):
     # HTTP client with connection pooling
     _http_client = httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0))
     
-    # Create persistent FlareSolverr session
-    await create_flaresolverr_session()
+    # Create persistent FlareSolverr session (with retries)
+    success = await create_flaresolverr_session(max_retries=15, retry_delay=4.0)
+    if not success:
+        log.error("Failed to create FlareSolverr session after retries. Service will start but fetches will fail.")
     
     log.info("RR Fetcher ready")
     yield
@@ -424,6 +435,7 @@ class FetchRequest(BaseModel):
 
 
 class FetchSuccessResponse(BaseModel):
+    success: bool = Field(True, description="Whether the fetch was successful")
     text: str = Field(..., description="Extracted chapter text")
     title: str = Field(..., description="Chapter title")
     html: str = Field(..., description="Full HTML response")

@@ -1,19 +1,17 @@
-# RR Fetcher Service - FastAPI + FlareSolverr in single container
-# Runs both RR Fetcher (port 8080) and FlareSolverr (port 8191) via supervisord
+# RR Fetcher Service - FastAPI + FlareSolverr in single container (minimal resources)
+# Runs both RR Fetcher (port 5555) and FlareSolverr (port 8191) via supervisord
 
 FROM python:3.12-slim
 
-# Install system dependencies for FlareSolverr + Chromium
+# Install system dependencies for FlareSolverr + Chromium (minimal set)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     supervisor \
     wget \
     gnupg \
-    fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
-    libatspi2.0-0 \
     libcups2 \
     libdbus-1-3 \
     libdrm2 \
@@ -63,10 +61,16 @@ RUN mkdir -p /var/log && chown -R fetcher:fetcher /var/log
 
 USER fetcher
 
-# Environment
+# Environment - minimal resource config
 ENV PYTHONUNBUFFERED=1 \
-    PORT=5555 \
-    FLARESOLVERR_URL=http://localhost:8191
+    FLARESOLVERR_URL=http://localhost:8191 \
+    CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --memory-pressure-off --max_old_space_size=1024" \
+    PYTHONMALLOC=malloc \
+    MALLOC_ARENA_MAX=2
+
+# Health check (required by Azure Container Apps)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD curl -f http://localhost:5555/health || exit 1
 
 EXPOSE 5555
 

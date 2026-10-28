@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  rr-fetcher:
+    build: .
+    container_name: rr-fetcher
+    ports:
+      - "5555:5555"
+      - "8191:8191"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.5"
+        reservations:
+          memory: 1G
+          cpus: "0.5"
+    restart: unless-stopped
+    environment:
+      - PORT=5555
+      - FLARESOLVERR_URL=http://localhost:8191
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5555/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3

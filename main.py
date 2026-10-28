@@ -135,17 +135,19 @@ def is_challenge_response(html: str) -> bool:
     if not html:
         return True
     lowered = html.lower()
+    # Only match explicit challenge page indicators, not generic Anubis references
+    # (Royal Road pages reference 'anubis' in scripts even after challenge is solved)
     challenge_markers = [
         "making sure you're not a bot",
         "making sure you are not a bot",
-        "anubis",
-        "techarohq/anubis",
         "protected by anubis",
         "proof of work",
         "just a moment",
         "checking your browser",
         "challenges.cloudflare.com",
         "cf_chl_captcha",
+        "cf_chl_opt",
+        "ray id",
     ]
     return any(m in lowered for m in challenge_markers)
 

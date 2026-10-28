@@ -14,6 +14,7 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl, Field
 
 logging.basicConfig(
@@ -348,7 +349,7 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
             details={"url": url, "html_length": len(html), "selectors_tried": SELECTORS}
         )
     
-    return {"text": text, "title": title, "html": html}
+    return {"success": True, "text": text, "title": title, "html": html}
 # ==================== FASTAPI APP ====================
 
 @asynccontextmanager
@@ -357,7 +358,10 @@ async def lifespan(app: FastAPI):
     log.info("Starting RR Fetcher...")
     
     # HTTP client with connection pooling
-    _http_client = httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0))
+    _http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(300.0, connect=30.0),
+        limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+    )
     
     # Create persistent FlareSolverr session (with retries)
     success = await create_flaresolverr_session(max_retries=15, retry_delay=4.0)
@@ -435,7 +439,7 @@ class FetchRequest(BaseModel):
 
 
 class FetchSuccessResponse(BaseModel):
-    success: bool = Field(True, description="Whether the fetch was successful")
+    success: bool = Field(..., description="Whether the fetch was successful")
     text: str = Field(..., description="Extracted chapter text")
     title: str = Field(..., description="Chapter title")
     html: str = Field(..., description="Full HTML response")
@@ -472,7 +476,7 @@ async def fetch_chapter(request: FetchRequest):
         )
     
     result = await fetch_with_flaresolverr(url, request.timeout_ms)
-    return FetchSuccessResponse(**result)
+    return result
 
 
 @app.get(

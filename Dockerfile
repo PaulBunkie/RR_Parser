@@ -65,9 +65,9 @@ USER fetcher
 
 # Environment
 ENV PYTHONUNBUFFERED=1 \
-    PORT=8080 \
+    PORT=5555 \
     FLARESOLVERR_URL=http://localhost:8191
 
-EXPOSE 8080
+EXPOSE 5555
 
 CMD ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

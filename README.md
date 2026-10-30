@@ -2,21 +2,45 @@
 
 **Single-container** microservice for extracting chapter text from Royal Road.
 Runs both **RR Fetcher (FastAPI)** and **FlareSolverr (Chromium)** via supervisord.
-Bypasses Anubis/Cloudflare challenges. Total RAM ~1 GB.
+Bypasses Anubis/Cloudflare challenges with **cookie persistence** — first request solves challenge, subsequent requests bypass it entirely using saved cookies. Total RAM ~1-2 GB.
 
 ## Architecture
 
 ```
-fly.io (main app)          GCE VM (single container)
-┌─────────────────┐       ┌──────────────────────────────────┐
-│ royalroad/      │──────▶│ Port 5555: RR Fetcher (FastAPI)  │
-│ client.py       │       │   → calls FlareSolverr           │
-└─────────────────┘       │   → extracts text                │
-                          │ Port 8191: FlareSolverr          │
-                          │   → Chromium browser             │
-                          │   → solves Anubis                │
-                          └──────────────────────────────────┘
-                          (supervisord manages both processes)
+                    ┌─────────────────────────────────────────────────────┐
+                    │                   RR Fetcher                        │
+                    │  (FastAPI, port 5555)                               │
+                    │                                                     │
+                    │  1. Try saved cookies  ──▶ 200 OK ──▶ Return HTML  │
+                    │       │                                              │
+                    │       ▼ (no cookies / expired)                       │
+                    │  2. Call FlareSolverr  ──▶ Solves challenge        │
+                    │       │              ──▶ Returns HTML + cookies     │
+                    │       │                                              │
+                    │       ▼                                              │
+                    │  3. Save cookies to disk (persistent volume)       │
+                    │       │                                              │
+                    │       ▼                                              │
+                    │  4. Parse HTML ──▶ Return text/title/html           │
+                    └──────────────────┬──────────────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────────────┐
+                    │                  FlareSolverr                       │
+                    │  (port 8191)                                        │
+                    │                                                     │
+                    │  • Chromium + undetected-chromedriver               │
+                    │  • Solves Anubis/Cloudflare challenges              │
+                    │  • Returns: HTML + cookies (cf_clearance, etc.)    │
+                    └─────────────────────────────────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────────────┐
+                    │              Persistent Storage                     │
+                    │  /home/fetcher/data/flaresolverr_cookies.json      │
+                    │                                                     │
+                    │  Survives container restarts!                       │
+                    └─────────────────────────────────────────────────────┘
+
+supervisord manages both processes
 ```
 
 ## Deploy: Single Container on GCE
@@ -126,6 +150,43 @@ pip install -r requirements.txt
 python -m uvicorn main:app --host 0.0.0.0 --port 5555 --timeout-keep-alive 300
 ```
 
+## How Cookie Persistence Works
+
+1. **First request** (no cookies): FlareSolverr launches Chromium → solves Anubis/Cloudflare challenge → returns HTML + cookies → cookies saved to `/home/fetcher/data/flaresolverr_cookies.json`
+
+2. **Subsequent requests** (valid cookies exist): RR Fetcher loads cookies → makes direct `httpx` request with cookies + browser headers → Cloudflare recognizes session → **no challenge** → fast response (~1s vs ~15s)
+
+3. **Cookie expiry**: If cookies expire (403/429), RR Fetcher falls back to FlareSolverr → gets fresh cookies → saves them → normal service resumes
+
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/fetch` | POST | Fetch chapter content. Uses cookies if available, falls back to FlareSolverr. |
+| `/cookies/status` | GET | Check saved cookie status and validity. |
+| `/health` | GET | Health check with cookie status. |
+
+### Request Format
+
+```json
+POST /fetch
+{
+  "url": "https://www.royalroad.com/fiction/12345/title/chapter/67890/chapter-title",
+  "timeout_ms": 120000
+}
+```
+
+### Response Format
+
+```json
+{
+  "success": true,
+  "text": "Extracted chapter text...",
+  "title": "Chapter Title",
+  "html": "Full HTML response"
+}
+```
+
 ## Resource Requirements
 
 | Component | RAM | CPU | Disk |
@@ -155,8 +216,9 @@ gcloud compute instances update-container rr-fetcher \
 
 ## Key Features
 
+- **Cookie Persistence** — cookies saved to disk, survive container restarts, bypass Cloudflare on subsequent requests
+- **Auto-recreate on challenge** — if cookies expire, automatically falls back to FlareSolverr to get fresh ones
 - **Persistent FlareSolverr session** (`rr_session`) - created once, reused for all requests
-- **Auto-recreate on challenge** - session recreated only when Anubis challenge detected
 - **Consistent headers** - User-Agent, Accept-Language, Accept-Encoding (no brotli) fixed across all requests
 - **Proper REST API** - HTTP status codes, structured error responses, OpenAPI docs
-- **Graceful fallback** - curl → cookies → Fetcher Service → error
+- **Graceful fallback** — direct cookies → FlareSolverr → error

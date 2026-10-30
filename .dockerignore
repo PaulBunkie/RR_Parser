@@ -19,8 +19,12 @@ build/
 # Env
 .env
 .env.local
+.venv/
 venv/
 .env/
+
+# Git
+.git/
 
 # Playwright cache (downloaded at build time)
 *.cache/

@@ -38,7 +38,7 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearm
 
 # Create non-root user
 RUN useradd -m -u 1000 fetcher && \
-    mkdir -p /home/fetcher/.cache && \
+    mkdir -p /home/fetcher/.cache /home/fetcher/data && \
     chown -R fetcher:fetcher /home/fetcher
 
 WORKDIR /app

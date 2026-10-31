@@ -151,7 +151,7 @@ class SessionManager:
 
     async def _create_session_internal(self) -> bool:
         """Internal session creation with retries."""
-        for attempt in range(10):
+        for attempt in range(20):
             try:
                 resp = await self.http_client.post(
                     f"{self.flaresolverr_url}/v1",
@@ -166,18 +166,18 @@ class SessionManager:
                     self._session_created_at = time.time()
                     return True
                 else:
-                    log.warning(f"Failed to create session (attempt {attempt+1}/10): {data}")
+                    log.warning(f"Failed to create session (attempt {attempt+1}/20): {data}")
             except httpx.ConnectError as e:
-                log.warning(f"FlareSolverr not ready (attempt {attempt+1}/10): {e}")
+                log.warning(f"FlareSolverr not ready (attempt {attempt+1}/20): {e}")
             except httpx.TimeoutException as e:
-                log.warning(f"FlareSolverr timeout (attempt {attempt+1}/10): {e}")
+                log.warning(f"FlareSolverr timeout (attempt {attempt+1}/20): {e}")
             except Exception as e:
-                log.warning(f"Error creating session (attempt {attempt+1}/10): {e}")
+                log.warning(f"Error creating session (attempt {attempt+1}/20): {e}")
 
-            if attempt < 9:
-                await asyncio.sleep(3.0)
+            if attempt < 19:
+                await asyncio.sleep(5.0)
 
-        log.error("Failed to create FlareSolverr session after 10 attempts")
+        log.error("Failed to create FlareSolverr session after 20 attempts")
         return False
 
     async def _destroy_session_internal(self) -> None:

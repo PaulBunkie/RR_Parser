@@ -67,7 +67,7 @@ USER fetcher
 ENV PYTHONUNBUFFERED=1 \
     FLARESOLVERR_URL=http://localhost:8191 \
     # Chrome flags for memory/process limits (FlareSolverr v3 uses DrissionPage)
-    CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --memory-pressure-off --disable-extensions --disable-background-networking --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=IsolateOrigins,site-per-process --renderer-process-limit=2 --no-zygote --js-flags=--max-old-space-size=512" \
+    CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --memory-pressure-off --disable-extensions --disable-background-networking --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=IsolateOrigins,site-per-process --renderer-process-limit=2 --no-zygote --js-flags=--max-old-space-size=512 --use-gl=disabled" \
     PYTHONMALLOC=malloc \
     MALLOC_ARENA_MAX=2
 

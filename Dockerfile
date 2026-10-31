@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     xdg-utils \
     xvfb \
+    dumb-init \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Google Chrome (for FlareSolverr) - modern approach without apt-key
@@ -61,10 +63,11 @@ RUN mkdir -p /var/log && chown -R fetcher:fetcher /var/log
 
 USER fetcher
 
-# Environment - minimal resource config
+# Environment - resource-constrained Chrome config
 ENV PYTHONUNBUFFERED=1 \
     FLARESOLVERR_URL=http://localhost:8191 \
-    CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --memory-pressure-off --max_old_space_size=1024" \
+    # Chrome flags for memory/process limits (FlareSolverr v3 uses DrissionPage)
+    CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer --memory-pressure-off --disable-extensions --disable-background-networking --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=IsolateOrigins,site-per-process --renderer-process-limit=2 --no-zygote --js-flags=--max-old-space-size=512" \
     PYTHONMALLOC=malloc \
     MALLOC_ARENA_MAX=2
 
@@ -74,4 +77,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
 
 EXPOSE 5555
 
+# Use dumb-init to reap zombie processes
+ENTRYPOINT ["dumb-init", "--"]
 CMD ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

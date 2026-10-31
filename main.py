@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -102,7 +103,131 @@ def save_cookies_to_flaresolverr(cookies: dict):
 
 # Global HTTP client for FlareSolverr
 _http_client: Optional[httpx.AsyncClient] = None
-_session_created = False
+_session_manager: Optional["SessionManager"] = None
+
+
+# ==================== SESSION MANAGER WITH ROTATION ====================
+
+class SessionManager:
+    """Manages FlareSolverr session with automatic rotation to prevent memory leaks."""
+
+    def __init__(
+        self,
+        http_client: httpx.AsyncClient,
+        flaresolverr_url: str,
+        session_name: str,
+        max_requests_per_session: int = 50,
+        max_session_age_seconds: int = 1800,  # 30 minutes
+    ):
+        self.http_client = http_client
+        self.flaresolverr_url = flaresolverr_url
+        self.session_name = session_name
+        self.max_requests_per_session = max_requests_per_session
+        self.max_session_age_seconds = max_session_age_seconds
+
+        self._session_created = False
+        self._request_count = 0
+        self._session_created_at: Optional[float] = None
+        self._lock = asyncio.Lock()
+
+    async def ensure_session(self) -> bool:
+        """Create session if needed, rotate if limits exceeded."""
+        async with self._lock:
+            now = time.time()
+
+            # Check if rotation needed
+            if self._session_created:
+                if self._request_count >= self.max_requests_per_session:
+                    log.info(f"Session request limit reached ({self._request_count}), rotating...")
+                    await self._destroy_session_internal()
+                elif self._session_created_at and (now - self._session_created_at) >= self.max_session_age_seconds:
+                    log.info(f"Session age limit reached ({now - self._session_created_at:.0f}s), rotating...")
+                    await self._destroy_session_internal()
+
+            if not self._session_created:
+                return await self._create_session_internal()
+
+            return True
+
+    async def _create_session_internal(self) -> bool:
+        """Internal session creation with retries."""
+        for attempt in range(10):
+            try:
+                resp = await self.http_client.post(
+                    f"{self.flaresolverr_url}/v1",
+                    json={"cmd": "sessions.create", "session": self.session_name},
+                    timeout=30
+                )
+                data = resp.json()
+                if data.get("status") == "ok":
+                    log.info(f"FlareSolverr session '{self.session_name}' created")
+                    self._session_created = True
+                    self._request_count = 0
+                    self._session_created_at = time.time()
+                    return True
+                else:
+                    log.warning(f"Failed to create session (attempt {attempt+1}/10): {data}")
+            except httpx.ConnectError as e:
+                log.warning(f"FlareSolverr not ready (attempt {attempt+1}/10): {e}")
+            except httpx.TimeoutException as e:
+                log.warning(f"FlareSolverr timeout (attempt {attempt+1}/10): {e}")
+            except Exception as e:
+                log.warning(f"Error creating session (attempt {attempt+1}/10): {e}")
+
+            if attempt < 9:
+                await asyncio.sleep(3.0)
+
+        log.error("Failed to create FlareSolverr session after 10 attempts")
+        return False
+
+    async def _destroy_session_internal(self) -> None:
+        """Destroy session and forcibly kill Chrome processes."""
+        if self._session_created:
+            try:
+                await self.http_client.post(
+                    f"{self.flaresolverr_url}/v1",
+                    json={"cmd": "sessions.destroy", "session": self.session_name},
+                    timeout=10
+                )
+                log.info(f"FlareSolverr session '{self.session_name}' destroyed via API")
+            except Exception as e:
+                log.warning(f"Failed to destroy session via API: {e}")
+
+        # BRUTE FORCE: Kill any remaining Chrome/Chromium processes
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["pkill", "-f", "chrome"],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                log.info("Killed residual Chrome processes via pkill")
+            elif result.returncode == 1:
+                log.debug("No Chrome processes to kill")
+            else:
+                log.warning(f"pkill returned code {result.returncode}: {result.stderr.decode()}")
+        except subprocess.TimeoutExpired:
+            log.warning("pkill timed out")
+        except Exception as e:
+            log.warning(f"Failed to kill Chrome processes: {e}")
+
+        self._session_created = False
+        self._request_count = 0
+        self._session_created_at = None
+
+    async def record_request(self) -> None:
+        """Increment request counter."""
+        async with self._lock:
+            self._request_count += 1
+
+    @property
+    def session_created(self) -> bool:
+        return self._session_created
+
+    @property
+    def request_count(self) -> int:
+        return self._request_count
 
 
 # ==================== ERROR CLASSES ====================
@@ -202,80 +327,31 @@ def is_challenge_response(html: str) -> bool:
     return any(m in lowered for m in challenge_markers)
 
 
-# ==================== FLARESOLVERR CLIENT ====================
+# ==================== FLARESOLVERR CLIENT (UPDATED) ====================
 
 async def create_flaresolverr_session(max_retries: int = 10, retry_delay: float = 3.0) -> bool:
-    """Create persistent FlareSolverr session with consistent headers.
-    
-    Args:
-        max_retries: Maximum number of retry attempts (default 10)
-        retry_delay: Delay between retries in seconds (default 3.0)
-    """
-    global _session_created
-    
-    for attempt in range(max_retries):
-        try:
-            resp = await _http_client.post(
-                f"{FLARESOLVERR_URL}/v1",
-                json={
-                    "cmd": "sessions.create",
-                    "session": SESSION_NAME,
-                },
-                timeout=30
-            )
-            data = resp.json()
-            if data.get("status") == "ok":
-                log.info("FlareSolverr session '%s' created", SESSION_NAME)
-                _session_created = True
-                return True
-            else:
-                log.warning("Failed to create FlareSolverr session (attempt %d/%d): %s", 
-                           attempt + 1, max_retries, data)
-        except httpx.ConnectError as e:
-            log.warning("FlareSolverr not ready (attempt %d/%d): %s", 
-                       attempt + 1, max_retries, e)
-        except httpx.TimeoutException as e:
-            log.warning("FlareSolverr timeout (attempt %d/%d): %s", 
-                       attempt + 1, max_retries, e)
-        except Exception as e:
-            log.warning("Error creating FlareSolverr session (attempt %d/%d): %s", 
-                       attempt + 1, max_retries, e)
-        
-        if attempt < max_retries - 1:
-            log.info("Retrying in %.1f seconds... (attempt %d/%d)", 
-                    retry_delay, attempt + 2, max_retries)
-            await asyncio.sleep(retry_delay)
-    
-    log.error("Failed to create FlareSolverr session after %d attempts", max_retries)
+    """Create persistent FlareSolverr session with consistent headers (legacy compatibility)."""
+    global _session_manager
+    if _session_manager:
+        return await _session_manager.ensure_session()
     return False
 
 
 async def destroy_flaresolverr_session() -> None:
     """Destroy FlareSolverr session on shutdown."""
-    global _session_created
-    if _session_created:
-        try:
-            await _http_client.post(
-                f"{FLARESOLVERR_URL}/v1",
-                json={"cmd": "sessions.destroy", "session": SESSION_NAME},
-                timeout=10
-            )
-            log.info("FlareSolverr session '%s' destroyed", SESSION_NAME)
-        except Exception:
-            pass
-        _session_created = False
+    global _session_manager
+    if _session_manager:
+        await _session_manager._destroy_session_internal()
 
 
 async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
-    """Fetch URL using persistent FlareSolverr session.
-    
-    Retries once with session recreation if challenge detected.
-    """
-    global _session_created
-    
-    if not _session_created:
-        await create_flaresolverr_session()
-    
+    """Fetch URL using persistent FlareSolverr session with auto-rotation."""
+    global _session_manager
+
+    # Ensure session exists (creates or rotates if needed)
+    if not await _session_manager.ensure_session():
+        raise UpstreamUnavailableError("Failed to create/ensure FlareSolverr session")
+
     async def do_request() -> dict:
         """Single fetch attempt."""
         payload = {
@@ -320,8 +396,8 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
         data = await do_request()
     except SessionError:
         log.warning("Session not found, recreating...")
-        _session_created = False
-        await create_flaresolverr_session()
+        await _session_manager._destroy_session_internal()
+        await _session_manager._create_session_internal()
         data = await do_request()
     
     # Check response structure
@@ -341,10 +417,8 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
     if is_challenge_response(html):
         log.warning("FlareSolverr returned challenge page (FS said 'not detected'), triggering retry...")
         log.warning("Challenge detected in FlareSolverr response, recreating session...")
-        _session_created = False
-        
-        # Recreate session and retry ONCE
-        await create_flaresolverr_session()
+        await _session_manager._destroy_session_internal()
+        await _session_manager._create_session_internal()
         log.info("Retrying request with new session...")
         try:
             data = await do_request()
@@ -369,6 +443,9 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
                 f"Retry failed: {e}",
                 details={"url": url, "error": str(e)}
             )
+    
+    # Record successful request for rotation tracking
+    await _session_manager.record_request()
     
     # Extract text from HTML
     text = ""
@@ -416,7 +493,7 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _http_client, _session_created
+    global _http_client, _session_manager
     log.info("Starting RR Fetcher...")
     
     # HTTP client with connection pooling
@@ -425,8 +502,17 @@ async def lifespan(app: FastAPI):
         limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
     )
     
+    # Initialize session manager with rotation
+    _session_manager = SessionManager(
+        http_client=_http_client,
+        flaresolverr_url=FLARESOLVERR_URL,
+        session_name=SESSION_NAME,
+        max_requests_per_session=50,      # Rotate every 50 requests
+        max_session_age_seconds=1800,     # Or every 30 minutes
+    )
+    
     # Create persistent FlareSolverr session (with retries)
-    success = await create_flaresolverr_session(max_retries=15, retry_delay=4.0)
+    success = await _session_manager.ensure_session()
     if not success:
         log.error("Failed to create FlareSolverr session after retries. Service will start but fetches will fail.")
     
@@ -594,7 +680,7 @@ async def health():
         "status": "ok",
         "flaresolverr_url": FLARESOLVERR_URL,
         "session": SESSION_NAME,
-        "session_created": _session_created,
+        "session_created": _session_manager.session_created if _session_manager else False,
     }
 
 

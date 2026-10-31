@@ -1,0 +1,22 @@
+import re
+
+with open('e:/Projects/Cursor/RR_Parser/main.py', 'r', encoding='utf-8') as f:
+    content = f.read()
+
+# 1. Replace first block - EXACT match from file (with \n and backslash continuations)
+old1 = 'FLARESOLVERR CLIENT ====================\n\nasync def create_flaresolverr_session(max_retries: int = 10, retry_delay: float = 3.0) -> bool:\n    """Create persistent FlareSolverr session with consistent headers.\n    \n    Args:\n        max_retries: Maximum number of retry attempts (default 10)\n        retry_delay: Delay between retries in seconds (default 3.0)\n    """\n    global _session_created\n    \n    for attempt in range(max_retries):\n        try:\n            resp = await _http_client.post(\n                f"{FLARESOLVERR_URL}/v1",\n                json={\n                    "cmd": "sessions.create",\n                    "session": SESSION_NAME,\n                },\n                timeout=30\n            )\n            data = resp.json()\n            if data.get("status") == "ok":\n                log.info("FlareSolverr session \'%s\' created", SESSION_NAME)\n                _session_created = True\n                return True\n            else:\n                log.warning("Failed to create FlareSolverr session (attempt %d/%d): %s", \n                           attempt + 1, max_retries, data)\n        except httpx.ConnectError as e:\n            log.warning("FlareSolverr not ready (attempt %d/%d): %s", \n                       attempt + 1, max_retries, e)\n        except httpx.TimeoutException as e:\n            log.warning("FlareSolverr timeout (attempt %d/%d): %s", \n                       attempt + 1, max_retries, e)\n        except Exception as e:\n            log.warning("Error creating FlareSolverr session (attempt %d/%d): %s", \n                       attempt + 1, max_retries, e)\n        \n        if attempt < max_retries - 1:\n            log.info("Retrying in %.1f seconds... (attempt %d/%d)", \n                    retry_delay, attempt + 2, max_retries)\n            await asyncio.sleep(retry_delay)\n    \n    log.error("Failed to create FlareSolverr session after %d attempts", max_retries)\n    return False\n\n\nasync def destroy_flaresolverr_session() -> None:\n    """Destroy FlareSolverr session on shutdown.""\"\n    global _session_created\n    if _session_created:\n        try:\n            await _http_client.post(\n                f"{FLARESOLVERR_URL}/v1",\n                json={"cmd": "sessions.destroy", "session": SESSION_NAME},\n                timeout=10\n            )\n            log.info("FlareSolverr session \'%s\' destroyed", SESSION_NAME)\n        except Exception:\n            pass\n        _session_created = False\n\n\nasync def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:\n    """Fetch URL using persistent FlareSolverr session.\n    \n    Retries once with session recreation if challenge detected.\n    """\n    global _session_created\n    \n    if not _session_created:\n        await create_flaresolverr_session()\n    \n    async def do_request() -> dict:'
+
+new1 = 'FLARESOLVERR CLIENT (UPDATED) ====================\n\nasync def create_flaresolverr_session(max_retries: int = 10, retry_delay: float = 3.0) -> bool:\n    """Create persistent FlareSolverr session with consistent headers (legacy compatibility)."""\n    global _session_manager\n    if _session_manager:\n        return await _session_manager.ensure_session()\n    return False\n\n\nasync def destroy_flaresolverr_session() -> None:\n    """Destroy FlareSolverr session on shutdown.""\"\n    global _session_manager\n    if _session_manager:\n        await _session_manager._destroy_session_internal()\n\n\nasync def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:\n    """Fetch URL using persistent FlareSolverr session with auto-rotation.""\"\n    global _session_manager\n\n    # Ensure session exists (creates or rotates if needed)\n    if not await _session_manager.ensure_session():\n        raise UpstreamUnavailableError("Failed to create/ensure FlareSolverr session")\n\n    async def do_request() -> dict:'
+
+if old1 in content:
+    content = content.replace(old1, new1)
+    print('Replacement 1 OK')
+else:
+    print('OLD1 NOT FOUND')
+    idx = content.find('FLARESOLVERR CLIENT')
+    if idx >= 0:
+        print('Found at:', idx)
+        print(repr(content[idx:idx+200]))
+
+with open('e:/Projects/Cursor/RR_Parser/main.py', 'w', encoding='utf-8') as f:
+    f.write(content)

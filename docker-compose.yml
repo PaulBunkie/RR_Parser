@@ -19,6 +19,10 @@ services:
     environment:
       - PORT=5555
       - FLARESOLVERR_URL=http://localhost:8191
+    # Hard memory limits at container level
+    mem_limit: 2g
+    memswap_limit: 2g
+    oom_score_adj: 500
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5555/health"]
       interval: 30s

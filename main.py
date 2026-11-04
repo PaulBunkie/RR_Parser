@@ -14,10 +14,19 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, status, Depends, Header
 from fastapi.responses import JSONResponse
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl, Field
+
+# API Key verification dependency
+async def verify_api_key(x_api_key: str = Header(None, alias="X-API-Key")):
+    if not x_api_key or x_api_key != API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +37,9 @@ log = logging.getLogger("rr-fetcher")
 # FlareSolverr configuration
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191").rstrip("/")
 SESSION_NAME = "rr_session"
+
+# API Key authentication
+API_KEY = os.getenv("API_KEY", "MfN4l9DjJ7OBrXHjJodjUdKToE0hJ8O_RYKI8t-b-0A")
 
 # Cookie persistence
 COOKIES_FILE = "/home/fetcher/data/flaresolverr_cookies.json"
@@ -109,7 +121,7 @@ _session_manager: Optional["SessionManager"] = None
 # ==================== SESSION MANAGER WITH ROTATION ====================
 
 class SessionManager:
-    """Manages FlareSolverr session with automatic rotation to prevent memory leaks."""
+    """Manages FlareSolverr session with lazy creation + TTL to prevent memory leaks."""
 
     def __init__(
         self,
@@ -118,20 +130,56 @@ class SessionManager:
         session_name: str,
         max_requests_per_session: int = 50,
         max_session_age_seconds: int = 1800,  # 30 minutes
+        idle_timeout_seconds: int = 300,      # 5 minutes idle = kill session
     ):
         self.http_client = http_client
         self.flaresolverr_url = flaresolverr_url
         self.session_name = session_name
         self.max_requests_per_session = max_requests_per_session
         self.max_session_age_seconds = max_session_age_seconds
+        self._idle_timeout_seconds = idle_timeout_seconds
 
         self._session_created = False
         self._request_count = 0
         self._session_created_at: Optional[float] = None
+        self._last_request_at: Optional[float] = None
         self._lock = asyncio.Lock()
+        self._cleanup_task: Optional[asyncio.Task] = None
+
+    async def start_cleanup_task(self) -> None:
+        """Start background task for idle session cleanup."""
+        async def cleanup_loop():
+            while True:
+                await asyncio.sleep(60)  # Check every minute
+                await self._check_idle_timeout()
+
+        self._cleanup_task = asyncio.create_task(cleanup_loop())
+        log.info("Session cleanup task started (check every 60s)")
+
+    async def stop_cleanup_task(self) -> None:
+        """Stop background cleanup task."""
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            log.info("Session cleanup task stopped")
+
+    async def _check_idle_timeout(self) -> None:
+        """Check if session is idle and destroy if timeout reached."""
+        async with self._lock:
+            if not self._session_created:
+                return
+            if self._last_request_at is None:
+                return
+            now = time.time()
+            if (now - self._last_request_at) >= self._idle_timeout_seconds:
+                log.info(f"Idle timeout reached ({now - self._last_request_at:.0f}s), destroying session...")
+                await self._destroy_session_internal()
 
     async def ensure_session(self) -> bool:
-        """Create session if needed, rotate if limits exceeded."""
+        """Create session if needed, rotate if limits exceeded or idle timeout reached."""
         async with self._lock:
             now = time.time()
 
@@ -217,9 +265,10 @@ class SessionManager:
         self._session_created_at = None
 
     async def record_request(self) -> None:
-        """Increment request counter."""
+        """Increment request counter and update last request time."""
         async with self._lock:
             self._request_count += 1
+            self._last_request_at = time.time()
 
     @property
     def session_created(self) -> bool:
@@ -228,6 +277,14 @@ class SessionManager:
     @property
     def request_count(self) -> int:
         return self._request_count
+
+    @property
+    def last_request_at(self) -> Optional[float]:
+        return self._last_request_at
+
+    @property
+    def idle_timeout_seconds(self) -> int:
+        return self._idle_timeout_seconds
 
 
 # ==================== ERROR CLASSES ====================
@@ -502,24 +559,26 @@ async def lifespan(app: FastAPI):
         limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
     )
     
-    # Initialize session manager with rotation
+    # Initialize session manager with lazy creation + TTL
     _session_manager = SessionManager(
         http_client=_http_client,
         flaresolverr_url=FLARESOLVERR_URL,
         session_name=SESSION_NAME,
         max_requests_per_session=50,      # Rotate every 50 requests
         max_session_age_seconds=1800,     # Or every 30 minutes
+        idle_timeout_seconds=300,         # 5 minutes idle = kill session + Chrome
     )
     
-    # Create persistent FlareSolverr session (with retries)
-    success = await _session_manager.ensure_session()
-    if not success:
-        log.error("Failed to create FlareSolverr session after retries. Service will start but fetches will fail.")
+    # Start background cleanup task for idle sessions
+    await _session_manager.start_cleanup_task()
     
-    log.info("RR Fetcher ready")
+    # NOTE: Lazy session creation - session will be created on first fetch request
+    
+    log.info("RR Fetcher ready (lazy session mode)")
     yield
     
     log.info("Shutting down RR Fetcher...")
+    await _session_manager.stop_cleanup_task()
     await destroy_flaresolverr_session()
     await _http_client.aclose()
 
@@ -600,9 +659,11 @@ class FetchSuccessResponse(BaseModel):
     response_model=FetchSuccessResponse,
     status_code=status.HTTP_200_OK,
     summary="Fetch chapter content from Royal Road",
+    dependencies=[Depends(verify_api_key)],
     responses={
         200: {"model": FetchSuccessResponse, "description": "Successfully extracted chapter"},
         400: {"model": ErrorResponse, "description": "Validation Error"},
+        401: {"model": ErrorResponse, "description": "Unauthorized - Invalid API Key"},
         408: {"model": ErrorResponse, "description": "Request Timeout"},
         502: {"model": ErrorResponse, "description": "Upstream Unavailable"},
         503: {"model": ErrorResponse, "description": "Service Unavailable (Challenge/Session)"},
@@ -672,7 +733,8 @@ async def fetch_chapter(request: FetchRequest):
 @app.get(
     "/health",
     summary="Health check",
-    response_model=dict
+    response_model=dict,
+    dependencies=[Depends(verify_api_key)]
 )
 async def health():
     """Health check endpoint."""

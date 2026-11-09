@@ -6,6 +6,7 @@ Proper REST API with HTTP status codes and structured errors.
 """
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -130,7 +131,7 @@ class SessionManager:
         session_name: str,
         max_requests_per_session: int = 50,
         max_session_age_seconds: int = 1800,  # 30 minutes
-        idle_timeout_seconds: int = 300,      # 5 minutes idle = kill session
+        idle_timeout_seconds: int = 1800,     # 30 minutes idle = kill session + Chrome
     ):
         self.http_client = http_client
         self.flaresolverr_url = flaresolverr_url
@@ -263,6 +264,7 @@ class SessionManager:
         self._session_created = False
         self._request_count = 0
         self._session_created_at = None
+        await asyncio.sleep(1.5)  # Ensure pkill settles before creating new session
 
     async def record_request(self) -> None:
         """Increment request counter and update last request time."""
@@ -451,11 +453,14 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
     # Attempt 1: Use existing session
     try:
         data = await do_request()
-    except SessionError:
-        log.warning("Session not found, recreating...")
+    except (SessionError, UpstreamUnavailableError) as e:
+        log.warning("FlareSolverr request failed, recreating session: %s", e)
         await _session_manager._destroy_session_internal()
         await _session_manager._create_session_internal()
-        data = await do_request()
+        try:
+            data = await do_request()
+        except Exception:
+            raise
     
     # Check response structure
     if "solution" not in data:
@@ -566,7 +571,7 @@ async def lifespan(app: FastAPI):
         session_name=SESSION_NAME,
         max_requests_per_session=50,      # Rotate every 50 requests
         max_session_age_seconds=1800,     # Or every 30 minutes
-        idle_timeout_seconds=300,         # 5 minutes idle = kill session + Chrome
+        idle_timeout_seconds=1800,        # 30 minutes idle = kill session + Chrome
     )
     
     # Start background cleanup task for idle sessions
@@ -718,15 +723,24 @@ async def fetch_chapter(request: FetchRequest):
                         title_tag = soup.select_one("title")
                         title = title_tag.get_text(strip=True) if title_tag else ""
                     if len(text) >= 500:
+                        gc.collect()  # Force GC after cookie bypass
+                        if _session_manager:
+                            await _session_manager.mark_activity()
                         return FetchSuccessResponse(success=True, text=text, title=title or "Chapter", html=response.text)
-                elif response.status_code == 200:
-                    log.warning("Saved cookies returned challenge page, invalidating cookies")
+                else:
+                    log.warning(f"Saved cookies failed with status {response.status_code}, invalidating cookies and resetting session")
                     save_cookies_to_flaresolverr({})
+                    if _session_manager:
+                        await _session_manager._destroy_session_internal()
         except Exception as e:
-            log.warning(f"Cookie fetch failed: {e}, falling back to FlareSolverr")
-    
+            log.warning(f"Cookie fetch failed: {e}, invalidating cookies and resetting session")
+            save_cookies_to_flaresolverr({})
+            if _session_manager:
+                await _session_manager._destroy_session_internal()
+
     # Fallback to FlareSolverr
     result = await fetch_with_flaresolverr(url, request.timeout_ms)
+    gc.collect()  # Force GC after each fetch to reclaim memory
     return result
 
 

@@ -272,6 +272,11 @@ class SessionManager:
             self._request_count += 1
             self._last_request_at = time.time()
 
+    async def mark_activity(self) -> None:
+        """Update last request timestamp to prevent idle timeout."""
+        async with self._lock:
+            self._last_request_at = time.time()
+
     @property
     def session_created(self) -> bool:
         return self._session_created
@@ -403,7 +408,7 @@ async def destroy_flaresolverr_session() -> None:
         await _session_manager._destroy_session_internal()
 
 
-async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
+async def fetch_with_flaresolverr(url: str, timeout_ms: int, cookies: Optional[dict] = None) -> dict:
     """Fetch URL using persistent FlareSolverr session with auto-rotation."""
     global _session_manager
 
@@ -411,7 +416,7 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
     if not await _session_manager.ensure_session():
         raise UpstreamUnavailableError("Failed to create/ensure FlareSolverr session")
 
-    async def do_request() -> dict:
+    async def do_request(attempt: int = 1) -> dict:
         """Single fetch attempt."""
         payload = {
             "cmd": "request.get",
@@ -419,9 +424,10 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
             "maxTimeout": timeout_ms,
             "session": SESSION_NAME,
             "waitFor": ", ".join(SELECTORS),
-            "headers": BROWSER_HEADERS,
             "returnOnlyCookies": False,
         }
+        if cookies:
+            payload["cookies"] = [{"name": k, "value": v} for k, v in cookies.items()]
         
         try:
             # Add 2 minutes buffer for Anubis challenge resolution
@@ -432,6 +438,16 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
             )
             resp.raise_for_status()
             return resp.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 500 and attempt < 3:
+                await asyncio.sleep(5.0 * attempt)
+                return await do_request(attempt + 1)
+            if e.response.status_code == 404 and "session" in str(e).lower():
+                raise SessionError("FlareSolverr session not found")
+            raise UpstreamUnavailableError(
+                f"FlareSolverr HTTP error: {e.response.status_code}",
+                details={"status_code": e.response.status_code, "body": e.response.text}
+            )
         except httpx.ConnectError as e:
             raise UpstreamUnavailableError(
                 "Cannot connect to FlareSolverr",
@@ -442,13 +458,7 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
                 "FlareSolverr request timeout",
                 details={"url": url, "timeout_ms": timeout_ms, "error": str(e)}
             )
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404 and "session" in str(e).lower():
-                raise SessionError("FlareSolverr session not found")
-            raise UpstreamUnavailableError(
-                f"FlareSolverr HTTP error: {e.response.status_code}",
-                details={"status_code": e.response.status_code, "body": e.response.text}
-            )
+
     
     # Attempt 1: Use existing session
     try:
@@ -470,10 +480,12 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
         )
     
     solution = data["solution"]
+    if not isinstance(solution, dict):
+        raise UpstreamUnavailableError("Invalid FlareSolverr solution format", details={"solution_type": type(solution).__name__, "solution": str(solution)[:200]})
     html = solution.get("response", "")
     
     # DEBUG: Log HTML preview for debugging challenge detection
-    log.debug("FlareSolverr HTML preview (first 500 chars): %s", html[:500] if html else "EMPTY")
+    log.debug("FlareSolverr HTML preview (first 500 chars): %s", (html or "")[:500] if html else "EMPTY")
     
     # IMMEDIATE challenge check - FlareSolverr v2 may say "Challenge not detected!" but return challenge page
     if is_challenge_response(html):
@@ -488,7 +500,7 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
             html = solution.get("response", "")
             
             # DEBUG
-            log.debug("Retry HTML preview (first 500 chars): %s", html[:500] if html else "EMPTY")
+            log.debug("Retry HTML preview (first 500 chars): %s", (html or "")[:500] if html else "EMPTY")
             
             if is_challenge_response(html):
                 log.error("Challenge persists after session recreation")
@@ -693,6 +705,7 @@ async def fetch_chapter(request: FetchRequest):
     
     # Try saved cookies first
     saved_cookies = load_saved_cookies()
+    direct_failed = False
     if saved_cookies:
         try:
             async with httpx.AsyncClient() as client:
@@ -728,18 +741,21 @@ async def fetch_chapter(request: FetchRequest):
                             await _session_manager.mark_activity()
                         return FetchSuccessResponse(success=True, text=text, title=title or "Chapter", html=response.text)
                 else:
-                    log.warning(f"Saved cookies failed with status {response.status_code}, invalidating cookies and resetting session")
-                    save_cookies_to_flaresolverr({})
-                    if _session_manager:
-                        await _session_manager._destroy_session_internal()
+                    log.warning(f"Saved cookies failed with status {response.status_code}, falling back to FlareSolverr with saved cookies")
+                    direct_failed = True
         except Exception as e:
-            log.warning(f"Cookie fetch failed: {e}, invalidating cookies and resetting session")
-            save_cookies_to_flaresolverr({})
-            if _session_manager:
-                await _session_manager._destroy_session_internal()
+            log.warning(f"Cookie fetch failed: {e}, falling back to FlareSolverr with saved cookies")
+            direct_failed = True
 
-    # Fallback to FlareSolverr
-    result = await fetch_with_flaresolverr(url, request.timeout_ms)
+    # Fallback to FlareSolverr (with saved cookies if available)
+    result = await fetch_with_flaresolverr(url, request.timeout_ms, cookies=saved_cookies if saved_cookies else None)
+
+    if direct_failed and saved_cookies:
+        log.warning("Both direct and FlareSolverr failed with saved cookies, invalidating cookies")
+        save_cookies_to_flaresolverr({})
+        if _session_manager:
+            await _session_manager._destroy_session_internal()
+
     gc.collect()  # Force GC after each fetch to reclaim memory
     return result
 

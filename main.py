@@ -129,9 +129,9 @@ class SessionManager:
         http_client: httpx.AsyncClient,
         flaresolverr_url: str,
         session_name: str,
-        max_requests_per_session: int = 50,
-        max_session_age_seconds: int = 1800,  # 30 minutes
-        idle_timeout_seconds: int = 1800,     # 30 minutes idle = kill session + Chrome
+        max_requests_per_session: int = 200,
+        max_session_age_seconds: int = 7200,  # 2 hours
+        idle_timeout_seconds: int = 3600,     # 1 hour idle = kill session
     ):
         self.http_client = http_client
         self.flaresolverr_url = flaresolverr_url
@@ -213,6 +213,7 @@ class SessionManager:
                     self._session_created = True
                     self._request_count = 0
                     self._session_created_at = time.time()
+                    self._last_request_at = time.time()
                     return True
                 else:
                     log.warning(f"Failed to create session (attempt {attempt+1}/20): {data}")
@@ -242,26 +243,7 @@ class SessionManager:
             except Exception as e:
                 log.warning(f"Failed to destroy session via API: {e}")
 
-        # BRUTE FORCE: Kill any remaining Chrome/Chromium processes
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["pkill", "-f", "chrome"],
-                capture_output=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                log.info("Killed residual Chrome processes via pkill")
-            elif result.returncode == 1:
-                log.debug("No Chrome processes to kill")
-            else:
-                log.warning(f"pkill returned code {result.returncode}: {result.stderr.decode()}")
-        except subprocess.TimeoutExpired:
-            log.warning("pkill timed out")
-        except Exception as e:
-            log.warning(f"Failed to kill Chrome processes: {e}")
-
-        self._session_created = False
+        
         self._request_count = 0
         self._session_created_at = None
         await asyncio.sleep(1.5)  # Ensure pkill settles before creating new session
@@ -483,6 +465,10 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int, cookies: Optional[d
     if not isinstance(solution, dict):
         raise UpstreamUnavailableError("Invalid FlareSolverr solution format", details={"solution_type": type(solution).__name__, "solution": str(solution)[:200]})
     html = solution.get("response", "")
+    
+    # Record successful request for session tracking
+    await _session_manager.record_request()
+    await _session_manager.mark_activity()
     
     # DEBUG: Log HTML preview for debugging challenge detection
     log.debug("FlareSolverr HTML preview (first 500 chars): %s", (html or "")[:500] if html else "EMPTY")
@@ -748,7 +734,8 @@ async def fetch_chapter(request: FetchRequest):
             direct_failed = True
 
     # Fallback to FlareSolverr (with saved cookies if available)
-    result = await fetch_with_flaresolverr(url, request.timeout_ms, cookies=saved_cookies if saved_cookies else None)
+    # If direct request with cookies failed (403), dont pass stale cookies to FlareSolverr
+    result = await fetch_with_flaresolverr(url, request.timeout_ms, cookies=None if direct_failed else (saved_cookies if saved_cookies else None))
 
     if not result.get("success") and direct_failed and saved_cookies:
         log.warning("Both direct and FlareSolverr failed with saved cookies, invalidating cookies")

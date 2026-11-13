@@ -737,8 +737,8 @@ async def fetch_chapter(request: FetchRequest):
             direct_failed = True
 
     # Fallback to FlareSolverr (with saved cookies if available)
-    # If direct request with cookies failed (403), dont pass stale cookies to FlareSolverr
-    result = await fetch_with_flaresolverr(url, request.timeout_ms, cookies=None if direct_failed else (saved_cookies if saved_cookies else None))
+    # Cookies may work in FlareSolverr even if direct request failed (different browser fingerprint)
+    result = await fetch_with_flaresolverr(url, request.timeout_ms, cookies=saved_cookies if saved_cookies else None)
 
     if not result.get("success") and direct_failed and saved_cookies:
         log.warning("Both direct and FlareSolverr failed with saved cookies, invalidating cookies")

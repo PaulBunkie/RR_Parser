@@ -145,6 +145,7 @@ class SessionManager:
         self._session_created_at: Optional[float] = None
         self._last_request_at: Optional[float] = None
         self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(1)  # One FlareSolverr request at a time
         self._cleanup_task: Optional[asyncio.Task] = None
 
     async def start_cleanup_task(self) -> None:
@@ -400,48 +401,47 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int, cookies: Optional[d
 
     async def do_request(attempt: int = 1) -> dict:
         """Single fetch attempt."""
-        payload = {
-            "cmd": "request.get",
-            "url": url,
-            "maxTimeout": timeout_ms,
-            "session": SESSION_NAME,
-            "waitFor": ", ".join(SELECTORS),
-            "returnOnlyCookies": False,
-        }
-        if cookies:
-            payload["cookies"] = [{"name": k, "value": v} for k, v in cookies.items()]
-        
-        try:
-            # Add 2 minutes buffer for Anubis challenge resolution
-            resp = await _http_client.post(
-                f"{FLARESOLVERR_URL}/v1",
-                json=payload,
-                timeout=timeout_ms / 1000 + 180
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 500 and attempt < 3:
-                await asyncio.sleep(5.0 * attempt)
-                return await do_request(attempt + 1)
-            if e.response.status_code == 404 and "session" in str(e).lower():
-                raise SessionError("FlareSolverr session not found")
-            raise UpstreamUnavailableError(
-                f"FlareSolverr HTTP error: {e.response.status_code}",
-                details={"status_code": e.response.status_code, "body": e.response.text}
-            )
-        except httpx.ConnectError as e:
-            raise UpstreamUnavailableError(
-                "Cannot connect to FlareSolverr",
-                details={"url": FLARESOLVERR_URL, "error": str(e)}
-            )
-        except httpx.TimeoutException as e:
-            raise UpstreamTimeoutError(
-                "FlareSolverr request timeout",
-                details={"url": url, "timeout_ms": timeout_ms, "error": str(e)}
-            )
-
-    
+        async with _session_manager._semaphore:
+            payload = {
+                "cmd": "request.get",
+                "url": url,
+                "maxTimeout": timeout_ms,
+                "session": SESSION_NAME,
+                "waitFor": ", ".join(SELECTORS),
+                "returnOnlyCookies": False,
+            }
+            if cookies:
+                payload["cookies"] = [{"name": k, "value": v} for k, v in cookies.items()]
+            
+            try:
+                # Add 2 minutes buffer for Anubis challenge resolution
+                resp = await _http_client.post(
+                    f"{FLARESOLVERR_URL}/v1",
+                    json=payload,
+                    timeout=timeout_ms / 1000 + 180
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 500 and attempt < 3:
+                    await asyncio.sleep(5.0 * attempt)
+                    return await do_request(attempt + 1)
+                if e.response.status_code == 404 and "session" in str(e).lower():
+                    raise SessionError("FlareSolverr session not found")
+                raise UpstreamUnavailableError(
+                    f"FlareSolverr HTTP error: {e.response.status_code}",
+                    details={"status_code": e.response.status_code, "body": e.response.text}
+                )
+            except httpx.ConnectError as e:
+                raise UpstreamUnavailableError(
+                    "Cannot connect to FlareSolverr",
+                    details={"url": FLARESOLVERR_URL, "error": str(e)}
+                )
+            except httpx.TimeoutException as e:
+                raise UpstreamTimeoutError(
+                    "FlareSolverr request timeout",
+                    details={"url": url, "timeout_ms": timeout_ms, "error": str(e)}
+                )
     # Attempt 1: Use existing session
     try:
         data = await do_request()

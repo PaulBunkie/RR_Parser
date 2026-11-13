@@ -470,9 +470,8 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int, cookies: Optional[d
     await _session_manager.record_request()
     await _session_manager.mark_activity()
     
-    # DESTROY session immediately after successful fetch to kill Chrome
-    # This ensures only ONE Chrome process at a time
-    await _session_manager._destroy_session_internal()
+    # KEEP session alive - Chrome stays alive for reuse
+    # Session will be destroyed on idle timeout or error only
     
     # DEBUG: Log HTML preview for debugging challenge detection
     log.debug("FlareSolverr HTML preview (first 500 chars): %s", (html or "")[:500] if html else "EMPTY")

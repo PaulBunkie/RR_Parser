@@ -36,7 +36,7 @@ logging.basicConfig(
 log = logging.getLogger("rr-fetcher")
 
 # FlareSolverr configuration
-FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191").rstrip("/")
+FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://flaresolverr:8191").rstrip("/")
 SESSION_NAME = "rr_session"
 
 # API Key authentication
@@ -708,7 +708,7 @@ async def fetch_chapter(request: FetchRequest):
     direct_failed = False
     if saved_cookies:
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(http2=True) as client:
                 response = await client.get(
                     url,
                     cookies=saved_cookies,
@@ -741,7 +741,7 @@ async def fetch_chapter(request: FetchRequest):
                             await _session_manager.mark_activity()
                         return FetchSuccessResponse(success=True, text=text, title=title or "Chapter", html=response.text)
                 else:
-                    log.warning(f"Saved cookies failed with status {response.status_code}, falling back to FlareSolverr with saved cookies")
+                    log.warning(f"Saved cookies failed with status {response.status_code}, falling back to FlareSolverr with saved cookies. Body: {response.text[:300]}")
                     direct_failed = True
         except Exception as e:
             log.warning(f"Cookie fetch failed: {e}, falling back to FlareSolverr with saved cookies")
@@ -750,7 +750,7 @@ async def fetch_chapter(request: FetchRequest):
     # Fallback to FlareSolverr (with saved cookies if available)
     result = await fetch_with_flaresolverr(url, request.timeout_ms, cookies=saved_cookies if saved_cookies else None)
 
-    if direct_failed and saved_cookies:
+    if not result.get("success") and direct_failed and saved_cookies:
         log.warning("Both direct and FlareSolverr failed with saved cookies, invalidating cookies")
         save_cookies_to_flaresolverr({})
         if _session_manager:
@@ -791,7 +791,7 @@ async def cookies_status():
     valid = False
     if has_clearance:
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(http2=True) as client:
                 resp = await client.get(
                     "https://www.royalroad.com/",
                     cookies=cookies,

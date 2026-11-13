@@ -2,31 +2,57 @@ version: "3.8"
 
 services:
   rr-fetcher:
-    build: .
+    image: rr-parser-rr-fetcher:latest
     container_name: rr-fetcher
     ports:
       - "5555:5555"
-      - "8191:8191"
     deploy:
       resources:
         limits:
           memory: 2G
-          cpus: "1.5"
+          cpus: "1.0"
         reservations:
           memory: 1G
-          cpus: "0.5"
+          cpus: "0.25"
     restart: unless-stopped
     environment:
       - PORT=5555
-      - FLARESOLVERR_URL=http://localhost:8191
+      - FLARESOLVERR_URL=http://flaresolverr:8191
       - API_KEY=${API_KEY}
     # Hard memory limits at container level
     mem_limit: 2g
     memswap_limit: 2g
     oom_score_adj: 500
+    depends_on:
+      flaresolverr:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "-H", "X-API-Key: ${API_KEY}", "http://localhost:5555/health"]
       interval: 30s
       timeout: 10s
       start_period: 180s
       retries: 3
+    networks:
+      - rr-network
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    ports:
+      - "8191:8191"
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+      - TZ=Europe/Moscow
+    healthcheck:
+      test: ["CMD", "curl", "http://localhost:8191/v1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    networks:
+      - rr-network
+
+networks:
+  rr-network:
+    driver: bridge

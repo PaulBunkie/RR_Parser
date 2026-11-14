@@ -738,10 +738,8 @@ async def fetch_chapter(request: FetchRequest):
             direct_failed = True
 
     # Fallback to FlareSolverr (with saved cookies if available)
-    # Cookies may work in FlareSolverr even if direct request failed (different browser fingerprint)
-    # Only pass cookies on first session creation; subsequent requests reuse existing session cookies
-    session_existed_before = _session_manager.session_created if _session_manager else False
-    result = await fetch_with_flaresolverr(url, request.timeout_ms, cookies=saved_cookies if (saved_cookies and not session_existed_before) else None)
+    # Always pass cookies to FlareSolverr - browser will use them if valid
+    result = await fetch_with_flaresolverr(url, request.timeout_ms, cookies=saved_cookies if saved_cookies else None)
 
     if not result.get("success") and direct_failed and saved_cookies:
         log.warning("Both direct and FlareSolverr failed with saved cookies, invalidating cookies")

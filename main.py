@@ -741,6 +741,7 @@ async def fetch_chapter(request: FetchRequest):
     # Always pass cookies to FlareSolverr - browser will use them if valid
     result = await fetch_with_flaresolverr(url, request.timeout_ms, cookies=saved_cookies if saved_cookies else None)
 
+    # Do not invalidate cookies on direct request failure - cookies may work in FlareSolverr
     if not result.get("success") and direct_failed and saved_cookies:
         log.warning("Both direct and FlareSolverr failed with saved cookies, invalidating cookies")
         save_cookies_to_flaresolverr({})

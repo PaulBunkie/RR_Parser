@@ -402,6 +402,7 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int, cookies: Optional[d
     async def do_request(attempt: int = 1) -> dict:
         """Single fetch attempt."""
         async with _session_manager._semaphore:
+            await _session_manager.mark_activity()
             payload = {
                 "cmd": "request.get",
                 "url": url,

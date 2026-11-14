@@ -169,7 +169,7 @@ class SessionManager:
         """Start background task for idle session cleanup."""
         async def cleanup_loop():
             while True:
-                await asyncio.sleep(60)  # Check every minute
+                await asyncio.sleep(10)  # Check every 10 seconds
                 await self._check_idle_timeout()
 
         self._cleanup_task = asyncio.create_task(cleanup_loop())
@@ -568,7 +568,11 @@ async def fetch_with_flaresolverr(url: str, timeout_ms: int) -> dict:
     cookies_list = solution.get("cookies", [])
     if cookies_list:
         save_cookies_to_flaresolverr(cookies_list)
-    
+        # Destroy FlareSolverr session immediately to kill Chrome process and free 100% CPU and 1GB RAM
+        if _session_manager:
+            log.info("Destroying FlareSolverr session after cookie extraction to free CPU and RAM")
+            await _session_manager._destroy_session_internal()
+
     return {"success": True, "text": text, "title": title, "html": html}
 # ==================== FASTAPI APP ====================
 
@@ -590,7 +594,7 @@ async def lifespan(app: FastAPI):
         session_name=SESSION_NAME,
         max_requests_per_session=50,      # Rotate every 50 requests
         max_session_age_seconds=1800,     # Or every 30 minutes
-        idle_timeout_seconds=1800,        # 30 minutes idle = kill session + Chrome
+        idle_timeout_seconds=30,          # 30 seconds idle = kill session + Chrome
     )
     
     # Start background cleanup task for idle sessions
